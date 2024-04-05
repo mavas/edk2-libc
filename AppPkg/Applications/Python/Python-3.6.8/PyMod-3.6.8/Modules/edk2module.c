@@ -3,7 +3,7 @@
     Derived from posixmodule.c in Python 2.7.2.
 
     Copyright (c) 2015, Daryl McDaniel. All rights reserved.<BR>
-    Copyright (c) 2011 - 2023, Intel Corporation. All rights reserved.<BR>
+    Copyright (c) 2011 - 2024, Intel Corporation. All rights reserved.<BR>
     This program and the accompanying materials are licensed and made available under
     the terms and conditions of the BSD License that accompanies this distribution.
     The full text of the license may be found at
@@ -22,16 +22,23 @@
 #include  <wchar.h>
 #include  <sys/syslimits.h>
 #include  <Uefi.h>
+#include  <Pi/PiDxeCis.h>      // Needed for the definition of EFI_AP_PROCEDURE
 #include  <Library/UefiLib.h>
 #include  <Library/PciLib.h>
 #include  <Library/IoLib.h>
 #include  <Library/UefiRuntimeServicesTableLib.h>
+#include  <Library/UefiBootServicesTableLib.h>
+#include  <Protocol/MpService.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 PyTypeObject EfiGuidType;
+EFI_MP_SERVICES_PROTOCOL   *gpMpService = NULL;
+UINTN                       gBSPProcessorNumber = 0;
+UINTN                       gNumberOfProcessors = 0;
+UINTN                       gNumberOfEnabledProcessors = 0;
 
 extern void _swsmi( unsigned int smi_code_data, unsigned int rax_value, unsigned int rbx_value, unsigned int rcx_value, unsigned int rdx_value, unsigned int rsi_value, unsigned int rdi_value );
 // -- Support routines
@@ -168,6 +175,35 @@ PyDoc_STRVAR(edk2__doc__,
 
 /* dummy version. _PyVerify_fd() is already defined in fileobject.h */
 #define _PyVerify_fd_dup2(A, B) (1)
+
+static EFI_STATUS
+MpServicesWhoAmI (
+  IN EFI_MP_SERVICES_PROTOCOL  *pMpService,
+  OUT UINTN                    *pProcessorNumber
+  )
+{
+  return pMpService->WhoAmI (pMpService, pProcessorNumber);
+}
+
+static EFI_STATUS
+MpServicesGetNumberOfProcessors (
+  IN EFI_MP_SERVICES_PROTOCOL  *pMpService,
+  OUT UINTN                    *pNumberOfProcessors,
+  OUT UINTN                    *pNumberOfEnabledProcessors
+
+  )
+{
+  return pMpService->GetNumberOfProcessors (pMpService, pNumberOfProcessors, pNumberOfEnabledProcessors);
+}
+
+static EFI_STATUS
+MpServicesSwitchBSP (
+  IN EFI_MP_SERVICES_PROTOCOL  *pMpService,
+  IN UINTN                      ProcessorNumber
+  )
+{
+  return pMpService->SwitchBSP(pMpService,  ProcessorNumber, TRUE);
+}
 
 #ifndef UEFI_C_SOURCE
 /* Return a dictionary corresponding to the POSIX environment table */
@@ -3865,6 +3901,56 @@ edk2_rdmsr(PyObject *self, PyObject *args)
   return Py_BuildValue("(II)", (unsigned long)veax, (unsigned long)vedx);
 }
 
+PyDoc_STRVAR(efi_rdmsr_ex__doc__,
+"rdmsr_ex(cpu, msr) -> (lower_32bits, higher_32bits)\n\
+\n\
+Read the given msr by switching to cpu and return the data as tuple.\n\
+\n\
+Parameters:\n\
+    cpu - The cpu number in hex or int format\n\
+    msr - The msr in hex or int format\n\
+\n\
+Return Value:\n\
+    a tuple with lower and higher 32 bit values read from the msr\n\
+");
+
+static PyObject *
+edk2_rdmsr_ex(PyObject *self, PyObject *args)
+{
+  unsigned int cpu, vecx, veax, vedx;
+  unsigned int bsp_switched = 0;
+  EFI_STATUS status = 0;
+  UINT64   data = 0;
+
+  if (!PyArg_ParseTuple(args, "II", &cpu, &vecx))
+    return NULL;
+
+  Py_BEGIN_ALLOW_THREADS
+  if (cpu != gBSPProcessorNumber && cpu < gNumberOfProcessors)
+  {
+    //switch the BSP to the cpu
+    status = MpServicesSwitchBSP(gpMpService, cpu);
+    if (!EFI_ERROR(status))
+    {
+        bsp_switched = 1;
+    }
+  }
+
+  data = AsmReadMsr64(vecx);
+
+  if (bsp_switched)
+  {
+    // switch BSP to the saved BSP processor
+    MpServicesSwitchBSP(gpMpService, gBSPProcessorNumber);
+    // update the saved BSP processor
+    MpServicesWhoAmI(gpMpService, &gBSPProcessorNumber);
+  }
+  Py_END_ALLOW_THREADS
+  veax = (UINT32)data;
+  vedx = (UINT64)data >> 32;
+  return Py_BuildValue("(II)", (unsigned long)veax, (unsigned long)vedx);
+}
+
 PyDoc_STRVAR(efi_wrmsr__doc__,
 "wrmsr(msr, lower_32bits, higher_32bits) -> None\n\
 \n\
@@ -3889,6 +3975,58 @@ edk2_wrmsr(PyObject *self, PyObject *args)
   data = vedx << 32 | veax;
   Py_BEGIN_ALLOW_THREADS
   AsmWriteMsr64(vecx, data);
+  Py_END_ALLOW_THREADS
+  Py_INCREF(Py_None);
+  return Py_None;
+}
+
+PyDoc_STRVAR(efi_wrmsr_ex__doc__,
+"wrmsr_ex(cpu, msr, lower_32bits, higher_32bits) -> None\n\
+\n\
+Writes higher_32bits:lower_32bits to the given msr.\n\
+\n\
+Parameters:\n\
+    cpu - The cpu number in hex or int format\n\
+    msr - The msr in hex or int format\n\
+    lower_32bits - The lower 32 bit data for the msr\n\
+    higher_32bits - The higher 32 bit data for the msr\n\
+\n\
+Return Value:\n\
+    None\n\
+");
+
+static PyObject *
+edk2_wrmsr_ex(PyObject *self, PyObject *args)
+{
+  unsigned int cpu, msr, veax, vedx;
+  unsigned int bsp_switched = 0;
+  EFI_STATUS status = 0;
+  UINT64   data = 0;
+
+  if (!PyArg_ParseTuple(args, "IIII", &cpu, &msr, &veax, &vedx))
+    return NULL;
+  data = (((UINT64)vedx) << 32) | veax;
+
+  Py_BEGIN_ALLOW_THREADS
+  if (cpu != gBSPProcessorNumber && cpu < gNumberOfProcessors)
+  {
+    //switch the BSP to the cpu
+    status = MpServicesSwitchBSP(gpMpService, cpu);
+    if (!EFI_ERROR(status))
+    {
+        bsp_switched = 1;
+    }
+  }
+  // write to MSR
+  AsmWriteMsr64(msr, data);
+
+  if (bsp_switched)
+  {
+    // switch BSP to the saved BSP processor
+    MpServicesSwitchBSP(gpMpService, gBSPProcessorNumber);
+    // update the saved BSP processor
+    MpServicesWhoAmI(gpMpService, &gBSPProcessorNumber);
+  }
   Py_END_ALLOW_THREADS
   Py_INCREF(Py_None);
   return Py_None;
@@ -4576,7 +4714,9 @@ static PyMethodDef edk2_methods[] = {
 #endif
     {"abort",               edk2_abort,      METH_NOARGS,  edk2_abort__doc__},
     {"rdmsr",               edk2_rdmsr,                 METH_VARARGS, efi_rdmsr__doc__},
+    {"rdmsr_ex",            edk2_rdmsr_ex,              METH_VARARGS, efi_rdmsr_ex__doc__},
     {"wrmsr",               edk2_wrmsr,                 METH_VARARGS, efi_wrmsr__doc__},
+    {"wrmsr_ex",            edk2_wrmsr_ex,              METH_VARARGS, efi_wrmsr_ex__doc__},
     {"readpci",             edk2_readpci,               METH_VARARGS, efi_readpci__doc__},
     {"writepci",            edk2_writepci,              METH_VARARGS, efi_writepci__doc__},
     {"readmem",             posix_readmem,               METH_VARARGS, efi_readmem__doc__},
@@ -4813,13 +4953,24 @@ static struct PyModuleDef edk2module = {
 PyMODINIT_FUNC
 PyEdk2__Init(void)
 {
-    PyObject *m;
+    PyObject    *m;
+    EFI_STATUS   Status = 0;
 
 #ifndef UEFI_C_SOURCE
   PyObject *v;
 #endif
+    Status = gBS->LocateProtocol(&gEfiMpServiceProtocolGuid, NULL, &gpMpService);
+    if (EFI_ERROR(Status))
+    {
+        printf("Unable to locate the Protocol MpServices protocol: %r\n", Status);
+        return NULL;
+    }
+    // Get the current BSP processor number
+    MpServicesWhoAmI(gpMpService, &gBSPProcessorNumber);
+    // Get the number of processors
+    MpServicesGetNumberOfProcessors(gpMpService, &gNumberOfProcessors, &gNumberOfEnabledProcessors);
 
-	m = PyModule_Create(&edk2module);
+    m = PyModule_Create(&edk2module);
     if (m == NULL)
         return m;
 
@@ -4870,7 +5021,7 @@ PyEdk2__Init(void)
     //PyModule_AddObject(m, "statvfs_result",
     //                   (PyObject*) &StatVFSResultType);
     initialized = 1;
-	return m;
+    return m;
 
 }
 
