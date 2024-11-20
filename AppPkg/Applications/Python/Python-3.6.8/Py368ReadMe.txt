@@ -68,12 +68,26 @@ and that you can successfully build packages within that distribution.
         gc          itertools       math          _operator
         time
 
-  C.  Edit AppPkg/AppPkg.dsc to enable (uncomment) the Python368.inf line
-    within the [Components] section.
+  C.  Set the PACKAGES_PATH and EDK2_LIBC_PATH environment variables to
+    the right values. PACKAGES_PATH should be set to the folder path of
+    edk2 and edk2-libc folders. EDK2_LIBC_PATH should be set to the
+    folder path of edk2-libc.
+    Use the below provided commands as reference to set the environment
+    variables to the corresponding values
+
+                set PACKAGES_PATH=<path_to_edk2>;<path_to_edk2_libc>;
+        set EDK2_LIBC_PATH=<path_to_edk2_libc>
+
+    where,
+        <path_to_edk2> should be replaced with the absolute path to
+                       edk2 folder on your development system.
+
+        <path_to_edk2_libc> should be replaced with the absolute path
+                       to edk2-libc folder on your development system.
 
   D.  Build AppPkg using the standard "build" command:
     For example, to build Python for an X64 CPU architecture:
-                    build -a X64 -p AppPkg\AppPkg.dsc
+                    build -a X64 -p AppPkg\AppPkg.dsc -D BUILD_PYTHON368
 
 4. Python-related paths and files
 =================================
@@ -118,7 +132,8 @@ system as follows:
   A script, create_python_pkg.bat , is provided which facilitates the population
   of the target EFI package.  Execute this script from within the
   AppPkg/Applications/Python/Python-3.6.8 directory, providing the Tool Chain, Target
-  Build and destination directory which is the path to the destination directory.  
+  Build and destination directory which is the path to the destination directory.
+  Ensure that EDK2_LIBC_PATH environment variable has been set to edk2-libc folder path.
   The appropriate contents of the AppPkg/Applications/Python/Python-3.6.8/Lib and
   Python.efi Application from Build/AppPkg/RELEASE_VS2017/X64/ will be
                                               ^^^^^^^^^^^^^^   
@@ -133,7 +148,7 @@ system as follows:
   2. Uncomment BsdSocketLib and EfiSocketLib LibraryClasses in Python368.inf
   3. Uncomment the statement #Modules/socketmodule.c in Python368.inf
   4. Build Python interpreter application using below command
-          build -a X64 -p AppPkg\AppPkg.dsc
+          build -a X64 -p AppPkg\AppPkg.dsc -D BUILD_PYTHON368
   5. Copy Build\AppPkg\RELEASE_VS2017\X64\Python.efi to \Efi\Tools on your
      target system. Replace "RELEASE_VS2017", in the source path, with
      values appropriate for your tool chain.
